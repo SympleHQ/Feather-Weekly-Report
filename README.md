@@ -3,7 +3,7 @@ SQL script that generates Feather's Weekly Report on Jobs &amp; Tasks
 
 ### SSH into production box
 
-ssh into any production instance using fab commands. With active <env>, run:
+ssh into any production instance using fab commands. With active `<env>`, run:
 ```
 $ fab production remote
 ```
