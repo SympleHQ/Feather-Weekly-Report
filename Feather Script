@@ -1,0 +1,111 @@
+import csv
+import re
+
+
+enterprise = Enterprise.objects.get(handle='feather')
+custom_fields = enterprise.custom_fields.order_by('name')
+job_custom_fields = custom_fields.filter(model=CustomField.MODEL_JOB)
+task_custom_fields = custom_fields.filter(model=CustomField.MODEL_JOBTASK)
+
+routes = Route.objects.all()
+routes = routes.select_related('user')
+
+enterprise_accounts = EnterpriseAccount.objects.all()
+enterprise_accounts = enterprise_accounts.select_related('manager', 'region')
+enterprise_accounts = enterprise_accounts.prefetch_related('usercontacts')
+
+jobs = Job.objects.filter(enterprise_account__owner=enterprise, is_deleted=False)
+jobs = jobs.exclude(route__branch='master')
+jobs = jobs.select_related('location', 'enterprise_account')
+jobs = jobs.prefetch_related(
+    Prefetch('job_tasks', queryset=JobTask.objects.filter(job_task_type=JobTask.TYPE_TASK)),
+    Prefetch('route', queryset=routes),
+    Prefetch('enterprise_account', queryset=enterprise_accounts),
+)
+jobs = jobs.order_by('route__branch')
+
+job_fields = [
+    'id', 'date', 'region', 'route_name', 'driver', 'street_address', 'street_address_2', 'city', 
+    'state', 'zip_code', 'appointment_window_start', 'appointment_window_end', 'onsite_at', 
+    'completed_at', 'account', 'account_manager', 'phone', 'status', 'admin_notes', 'field_notes'
+]
+job_fields.extend(f.name for f in job_custom_fields)
+
+task_fields = ['id', 'job', 'name', 'status', 'status_at']
+task_fields.extend(f.name for f in task_custom_fields)
+
+def add_custom_data(row, obj, fields):
+    # Note: This is flimsy. If there's a custom field with an exact string match to
+    # one of the hardcoded fields, it's going to overwrite the hardcoded field's value.
+    # We're saved a bit because our fields are lowercase and Feather's are uppercase.
+    row.update({f.name: obj.custom_data.get(f.pk, "") for f in fields})
+
+def format_row(row):
+    for k in row:
+        row[k] = unicode(row[k]).encode('ascii', 'ignore') # Take the easy way out of unicode/CSV handling
+        row[k] = re.sub(r'[\n\r]', " ", row[k])            # Same for newlines...
+
+with open('jobs.csv', 'wb') as job_file, open('tasks.csv', 'wb') as task_file:
+    job_writer = csv.DictWriter(job_file, fieldnames=job_fields)
+    task_writer = csv.DictWriter(task_file, fieldnames=task_fields)
+    job_writer.writeheader()
+    task_writer.writeheader()
+
+    for job in jobs:
+        job_row = {
+            'id': job.pk,
+            'date': job.route.branch,
+            'region': job.enterprise_account.region.code,
+            'route_name': job.route.name,
+            'driver': job.route.user.get_full_name() if job.route.user else None,
+            'street_address': job.location.street_address,
+            'street_address_2': job.location.street_address_2,
+            'city': job.location.city,
+            'state': job.location.state,
+            'zip_code': job.location.zip_code,
+            'appointment_window_start': (
+                job.appt_window_start_absolute().isoformat() if job.appt_window_start else None
+            ),
+            'appointment_window_end': (
+                job.appt_window_end_absolute().isoformat() if job.appt_window_end else None
+            ),
+            'onsite_at': job.onsite_at.isoformat() if job.onsite_at else None,
+            'completed_at': job.completed_at.isoformat() if job.completed_at else None,
+            'account': job.enterprise_account.internal_id,
+            'account_manager': (
+                job.enterprise_account.manager.get_full_name() 
+                if job.enterprise_account.manager 
+                else None
+            ),
+            'phone': (
+                # `.all()` is used to take the advantage of the prefetch.
+                job.enterprise_account.usercontacts.all()[0].phone_number
+                if len(job.enterprise_account.usercontacts.all())
+                else None
+            ),
+            'status': job.job_status,
+            'admin_notes': job.admin_notes, 
+            'field_notes': job.field_notes,
+        }
+        add_custom_data(job_row, job, job_custom_fields)
+        format_row(job_row)
+        job_writer.writerow(job_row)
+
+        for task in job.job_tasks.all():
+            current_status = None
+            for history_task in task.history.order_by('history_date').all():
+                if current_status == history_task.job_task_status:
+                    continue
+                current_status = history_task.job_task_status
+                task_row = {
+                    'id': task.id,
+                    'job': task.job.pk,
+                    'name': task.name,
+                    'status': history_task.job_task_status,
+                    'status_at': history_task.history_date.isoformat(),
+                }
+                add_custom_data(task_row, task, task_custom_fields)
+                format_row(task_row)
+                task_writer.writerow(task_row)
+
+scp ubuntu@52.53.153.161:/home/ubuntu/symple/*.csv ~/Desktop/
